@@ -14,6 +14,48 @@ The Ollama container runs a **native [SYCL](https://github.com/ggml-org/llama.cp
 
 ![screenshot](resources/open-webui.png)
 
+---
+
+## Fork note: the deployed container is upstream `llama.cpp:server-vulkan`
+
+On the Unraid box (`br0`, `192.168.1.2`) the running container is **not** built
+from this repo. It is upstream's prebuilt `ghcr.io/ggml-org/llama.cpp:server-vulkan`,
+serving Qwen3-VL-4B as a Frigate GenAI vision backend, tuned purely with runtime
+flags. [`llama-server/README.md`](llama-server/README.md) documents the whole
+setup: Unraid template fields, Frigate config, measured numbers, and the failures
+worth not repeating.
+
+Measured on an Arc A380 with real Frigate events:
+
+Steady state over ~5,900 production requests:
+
+| | Ollama | llama-server + Vulkan |
+|---|---|---|
+| per event | ~20.4s | **6.3s** |
+| prefill | 73 tok/s | **99 tok/s** |
+| generation | 14.0 tok/s | **23.2 tok/s** |
+| vision tower VRAM | 3,382 MiB | 797 MiB |
+
+Most of that came from `--image-min-tokens 512`, which Ollama hardcodes to 1024
+and doesn't expose — on 175x175 thumbnails that was a ~34x pixel upscale. The rest
+came from a native mmproj GGUF instead of Ollama's packed blob, and from Vulkan:
+generation had been stuck at ~16 tok/s across four SYCL configurations, which
+turned out to be per-kernel launch overhead rather than a bandwidth limit.
+
+Two things not to rediscover, both documented in detail in that README:
+
+- **`llama.cpp:server-intel` cannot run this workload.** Its IGC hits an internal
+  compiler error on the SYCL flash-attention kernel, and disabling flash attention
+  makes quantized KV unavailable and exhausts the 6 GB card.
+- **Frigate needs `provider: llamacpp`**, not `openai`, and `num_ctx` must be
+  absent — a client-side `num_ctx` truncates image tokens silently on a VLM.
+
+`ollama-sycl/` is unchanged and still builds. Nothing pulls it now, but its
+workflow is also what daily-merges upstream into this fork, and it's the way back
+to Ollama's model management and Open WebUI's native integration if you want them.
+
+---
+
 ## Services
 1. Ollama
    * Runs Ollama with a **native llama.cpp `ggml-sycl` backend**, compiled from Ollama source against Intel® oneAPI (`icpx` / Level Zero). No IPEX-LLM dependency.
