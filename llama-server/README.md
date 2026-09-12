@@ -1,6 +1,18 @@
 # llama-server on an Intel Arc A380 as a Frigate GenAI backend
 
-What is actually deployed, why, and the measurements behind each decision.
+> **Superseded as a deployment guide.** `Qwen3-VL-4B` was replaced in place by
+> `Qwen3.6-35B-A3B` on 2026-08-02. **[MOE.md](MOE.md) documents what is running**;
+> this file's Unraid template, Post Arguments, Frigate config and model paths are
+> all historical — the live container uses `LLAMA_ARG_*` environment variables,
+> `/mnt/cache` rather than `/mnt/user`, and a different model entirely.
+>
+> Kept because the **analysis** is still load-bearing and MOE.md cites it: the
+> `--image-min-tokens` derivation, the Q6_K rejection, why SYCL was abandoned, the
+> dequant-bound-not-bandwidth-bound finding, and the benchmarking rules. Rollback
+> args for this model are in [MOE.md](MOE.md#to-the-4b) — and they differ from the
+> ones below, because the container had already drifted before it was replaced.
+
+The 4B era: what was deployed, why, and the measurements behind each decision.
 
 **There is no custom image here.** The deployed container is upstream's own
 prebuilt `ghcr.io/ggml-org/llama.cpp:server-vulkan`, driven entirely by runtime
@@ -404,12 +416,21 @@ Q6_K result above.
 would roughly halve it, at the run-to-run consistency cost documented above. It's
 the main remaining lever, and it's a quality trade rather than a free win.
 
-**The prompt cache never hits and is pure overhead.** Every request logs
-`making room for prompt cache entry, removing oldest entry (size = ~43 MiB)`,
-because each Frigate event is a unique image so a cached prefix can never match.
-`--cache-ram 0` disables it (`-cram`, `0` = disable, `-1` = unlimited). This is
-host RAM, not VRAM, so the win is bounded — untested, and worth an A/B rather
-than assuming.
+**The prompt cache never hits — disabled, but it bought nothing (measured).**
+With it on, every request logged `making room for prompt cache entry, removing
+oldest entry (size = ~43 MiB)`, because each Frigate event is a unique image so a
+cached prefix can never match. `--cache-ram 0` disables it (`-cram`, `0` =
+disable, `-1` = unlimited) and the warnings stop, but the A/B is a null result:
+
+| | cache on (n=11) | cache off (n=13) |
+|---|---|---|
+| prefill | 99.4 tok/s | 99.1 tok/s |
+| generation | 23.2 tok/s | 23.1 tok/s |
+| per event | 6.29s | 6.35s |
+
+All inside noise. It's host RAM, not VRAM or GPU work, so there was never much to
+win. The flag stays because discarding a useless 43 MiB allocation per request is
+free — but don't expect it to do anything, and don't re-run this experiment.
 
 ### Two easy wins
 
