@@ -3,6 +3,18 @@
 Running a 35B mixture-of-experts model that does not fit in 6 GB of VRAM, by
 keeping attention on the A380 and the routed experts in system RAM.
 
+> ⛔ **Retired 2026-09-12 — llama-server is no longer deployed.** The Frigate GenAI
+> backend was reverted to the `ollama` container (`uberchuckie/ollama-intel-gpu:dev`,
+> `qwen2.5vl:3b`) on **192.168.1.2:11434**, as one variable in the reset investigation.
+> `llama-server` is `Exited`, and the 35B described here has not been the running model
+> since **2026-08-16**, when it was rolled back to the dense 4B. See
+> **[crash-analysis-2026-09-12.md](crash-analysis-2026-09-12.md)** for why, the measured
+> reset history, and what has to hold before this can be reinstated.
+>
+> Kept for its **analysis and measurements**, which remain load-bearing. Everything here
+> describing the live deployment — the container, `192.168.1.2:8080`, model paths, Frigate
+> and Mealie wiring — is historical.
+
 **This replaced the 4B in place.** One model now serves Frigate, Mealie and chat
 on `192.168.1.2:8080`. The 4B-era doc is [README.md](README.md); this supersedes
 its deployment section but not its analysis. Rollback args are

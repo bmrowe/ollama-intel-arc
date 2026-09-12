@@ -10,6 +10,18 @@
 roughly every 6 days 6 hours, with no kernel output of any kind — and the platform is
 physically incapable of recording why.**
 
+> ⚠ **Update 2026-08-23:** the predicted reset **did not happen**. See
+> [Outcome — 2026-08-23](#outcome--2026-08-23-the-prediction-failed). The "every 6 days
+> 6 hours" claim above now rests on two intervals that were not followed by a third, and
+> should be read as a hypothesis that failed its first test, not as an established cadence.
+
+> ⚠ **Update 2026-09-12: partly superseded.** Three more resets (Sep 7, 8, 12) and a
+> dated five-year reset history built from `/boot/config/parity-checks.log` have replaced
+> the cadence framing and the "levers not yet pulled" ranking in this document, and
+> retracted its PCIe-link and reset-path leads. See
+> **[crash-analysis-2026-09-12.md](crash-analysis-2026-09-12.md)**. The instrumentation,
+> ruled-out list and method notes below are still current.
+
 Investigated 2026-08-16 evening. All timings local (CDT, UTC−5) unless marked.
 
 ---
@@ -25,6 +37,7 @@ Investigated 2026-08-16 evening. All timings local (CDT, UTC−5) unless marked.
 - [The cadence, and the tension it creates](#the-cadence-and-the-tension-it-creates)
 - [Instrumentation built tonight](#instrumentation-built-tonight)
 - [Changes in flight and the prediction](#changes-in-flight-and-the-prediction)
+- [Outcome — 2026-08-23: the prediction failed](#outcome--2026-08-23-the-prediction-failed)
 - [Levers not yet pulled](#levers-not-yet-pulled)
 - [Method notes and gotchas](#method-notes-and-gotchas)
 
@@ -303,6 +316,103 @@ as a generic quirk.
   workload are eliminated together, and very little is left standing.
 - **Passes clean** → either one of the three changes fixed it, or the cadence was never
   real. Reintroduce one variable per subsequent window (~Aug 29) to find out which.
+
+---
+
+## Outcome — 2026-08-23: the prediction failed
+
+**The box did not reset.** Verified 2026-08-23 09:50, more than eight hours past a ±15
+minute window.
+
+| witness | reading | means |
+|---|---|---|
+| `uptime` | **6d 10h 41m**, tracing to Aug 16 23:09 | no reboot of any kind |
+| netdata `system.cpu` gap scan | **one unbroken DATA run** Aug 16 23:09 → now | no interruption |
+| NVMe unsafe shutdowns | **57 / 67** — the exact baselines | no abrupt termination |
+| `/sys/fs/pstore` | empty | no panic path taken |
+| remote syslog 01:00–02:58 | no entries at all | normal idle silence, box alive throughout |
+
+The NVMe counters matter most here: they are independent of both uptime and netdata, so
+they close the "what if every software witness lied" branch.
+
+### It passed clean *under load*, which is stronger
+
+The Proxmox `vzdump` job — `schedule sun 02:00`, discovered 2026-08-23 — ran
+**02:00:01 → 02:05:17**, pushing **53 GiB** of PBS backup traffic into this host, squarely
+inside the predicted window. Guest 101 alone streamed 32 GiB at up to 865 MiB/s read.
+The box absorbed it without flinching. A quiet idle pass would have been weaker evidence.
+
+### The one gap in the record is not an event
+
+`system.cpu` shows a **34-second** gap at **04:00:42 → 04:01:16**. That is the 04:00 Docker
+Auto Update restarting containers — netdata's own container included, which is why its
+collection stops. `docker ps` confirms `netdata`, `llama-server` and `mealiev1` all
+restarted at that hour. A host reset is 3–8 minutes **and resets uptime**; this did neither.
+Do not mistake it for a near-miss.
+
+### The 150-hour timer search, extended to pve
+
+[The cadence section](#the-cadence-and-the-tension-it-creates) searched Unraid only. The
+`vzdump` discovery proved that scheduled work targeting this host also lives on **pve**, so
+the search was redone across both machines:
+
+| source | schedules | period |
+|---|---|---|
+| pve `vzdump` (`/etc/pve/jobs.cfg`) | `sun 02:00` | 168h |
+| pve cron | e2scrub, sysstat, ZFS trim/scrub | daily / weekly / monthly |
+| pve systemd timers | apt-daily, logrotate, fstrim, pve-daily-update, xfs_scrub_all, e2scrub_all | daily / weekly |
+| Unraid cron | stock Slackware — `:47` hourly, 04:40 daily, Sun 04:30 weekly, 04:20 monthly | — |
+| PBS container on Unraid | **none configured at all** (fixed 2026-08-23, see below) | — |
+
+**Nothing on either machine keeps a ~150-hour clock.** The original finding survives and
+now covers pve. `pve-daily-update.timer` last fired at **01:29:55**, 23 minutes before the
+predicted moment — daily, so not a cadence match, but worth knowing it exists.
+
+### Where this leaves the two hypotheses
+
+Unchanged and still undistinguished:
+
+1. One of the three Aug 16 changes fixed it.
+2. **The cadence was never real** — three events and two intervals is thin, and
+   [the cadence section](#the-cadence-and-the-tension-it-creates) already warned that 0.12%
+   is exactly the number that fools people.
+
+**The experiment that would separate them will not be run.** Reverting to the 35B means
+running the deployed Frigate GenAI backend degraded for a six-day window, on a model that
+previously OOM'd and needs its `CTX_SIZE`/`BATCH` set carefully. Decided 2026-08-23: the
+three changes stay, and the diagnostic value does not justify the production cost.
+
+So the plan is a **passive watch with a stopping rule**, not a bisection. Projecting the
+cadence forward from the last real reset (Aug 16 19:31 + n × 6d 6h 22m):
+
+| n | window | status |
+|---|---|---|
+| 1 | 2026-08-23 01:53 (Sun) | **missed — box stayed up** |
+| 2 | 2026-08-29 08:15 (Sat) | |
+| 3 | 2026-09-04 14:37 (Fri) | |
+| 4 | 2026-09-10 20:59 (Thu) | |
+| 5 | 2026-09-17 03:21 (Thu) | |
+
+**Stopping rule: four consecutive clean windows (through ~2026-09-10, roughly 25 days)
+closes this as resolved-or-imaginary.** If a reset happens before then, the changes did not
+fix it, the cadence reasserts, and the anchor resets to that event. Either outcome is
+informative and neither costs anything — the instrumentation is already built and running.
+
+### Variables added to this host on 2026-08-22, for the record
+
+Not believed relevant — none touches the GPU or PCIe path — but they were not present
+during the Aug 4, 10 or 16 windows and should not be discovered later as a surprise:
+
+- SMB share `timemachine` (private, array-only, 500 GB cap) and a **106 GB** first backup
+  written to the array
+- `authorized_keys` for key-based SSH (`/root/.ssh` is a symlink to
+  `/boot/config/ssh/root` on the ZFS boot pool — no `go` file entry needed)
+- PBS on this host given a `gc-schedule sun 03:00` and a `verify-weekly` job at `sun 05:00`;
+  LXC 110 (`syslog`) added to the pve backup job, which had never been backing up the
+  container that holds the entire external-witness apparatus
+
+`/boot/config/go` was **not** modified. It still carries only the EEE fix, the multicast
+snooping loop, the pstore mount and the ASPM `setpci` block.
 
 ---
 
