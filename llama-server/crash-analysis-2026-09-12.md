@@ -1,5 +1,11 @@
 # Crash analysis — 2026-09-12
 
+> ⛔ **The watch opened here FAILED on 2026-09-20, after 8 of its 30 days — see
+> [`crash-analysis-2026-09-20.md`](crash-analysis-2026-09-20.md).** The evidence work below
+> stands (`parity-checks.log` as the reset ledger, the five-year episodic shape, the
+> retractions). Its **conclusion does not**: reverting to `ollama` did not change the reset
+> rate, so the GenAI server, the GPU backend and the model are all exonerated.
+
 **The sixth reset, and the first day the investigation produced a dated reset history
 instead of a guess.** Two long-standing conclusions are retracted, one new evidence
 source supersedes every other, and the deployed GenAI backend was reverted from
