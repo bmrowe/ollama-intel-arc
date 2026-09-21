@@ -6,6 +6,13 @@ server, the GPU backend and the model are all exonerated. What remains is hardwa
 
 Investigated 2026-09-20. All timings local (CDT, UTC−5) unless marked.
 
+> 🔄 **Read the [addendum](#addendum--the-same-day-what-changed-in-july-and-the-detector-finding)
+> first.** Later the same day, Frigate's config history showed object detection had been
+> moved from the iGPU onto the A380 between June 24 and August 18 — and stayed there through
+> every reset, including the ollama watch. Detection was moved back to the iGPU at 10:52, and
+> **that** is the live test (to 2026-10-11). The "What remains" ranking and "Recommendation"
+> below predate it: the PSU swap is deferred, not cancelled.
+
 Continues [`crash-analysis-2026-09-12.md`](crash-analysis-2026-09-12.md), whose watch
 this closes. Its evidence-source findings (`parity-checks.log` as the reset ledger, the
 five-year episodic shape) still stand; its **action** — revert to `ollama` — is now
@@ -143,6 +150,8 @@ slot-overdraw derivation, the 6 d 6 h "cadence", and `power1_max_interval` as a 
 3. **Any LLM inference on the A380 at all.** Still formally open: the quiet era ran the
    same card on openvino detection only, at 1 per 27 d. Testing it means turning GenAI off
    for ~3 weeks and losing the feature, with the same slow-measurement problem as before.
+   > ⚠️ **Wrong, corrected in the [addendum](#-the-detector-finding):** the quiet era ran
+   > detection on the **iGPU** (`device: GPU` = GPU.0), not the A380. The A380 was near idle.
 
 Not a candidate any more: **a different GPU.** Both backends and three models reset; a new
 card does not address what is left, and a 320 W card would add the largest transient load
@@ -177,3 +186,146 @@ Swapping the most-suspected part beats waiting out another soak window.
   ollama's does too, via `docker inspect --format "{{.LogPath}}"`.
 - **`dmesg -T | grep "Killed process"`** after a reboot shows only kills from the *current*
   boot; Fix Common Problems re-alerts on older ones until the ring buffer clears.
+
+---
+
+## Addendum — the same day: what changed in July, and the detector finding
+
+Everything below was established after the sections above, still on 2026-09-20.
+
+### Upstream power is exonerated
+
+**Eaton 5PX alarm log** (`alarmLogs-2.csv`, 565 events, 2025-07-04 → 2026-09-12): **nothing
+within ±15 minutes of any of the seven resets.** The UPS records plenty — 60 "On battery"
+events, nearly all 1–2 s utility dropouts the server rode through, and the 2026-09-07
+breaker trip exactly as independently known (on battery 08:28:28, back 08:51:20 CDT), which
+validates the log's clock. Only one AVR/buck event in fourteen months (July 2025).
+
+**Eaton measures log** (`logMeasures-5.csv`, 1-min samples, Sep 14 → Sep 20, no gaps): input
+117.2–122.8 V, 59.9–60.0 Hz, battery 100 % throughout, output tracking input. At the Sep 20
+reset input was 120.0 → 120.4 V; the only trace is closet load dropping 285 → 255 W while the
+server was down. **Power into the box never moved; the box just died.**
+
+Upstream is fully accounted for. The utility is disturbed often and the server never resets
+then; it resets at unremarkable moments instead.
+
+### Userspace was healthy and unaware
+
+All 25 container json logs survive a reset (cache pool). Last pre-death lines: netdata
+07:53:37, frigate 07:53:28, mealie 07:53:22, Pulse 07:53:23, ollama 07:52:44. In the ten
+minutes before death the only error lines were two routine recurring ones — netdata's missing
+`scripts.d` (every minute, all day) and proxmox-backup-server's `os error 107` (every 5 min,
+including hours after the reboot). No stalls, GPU errors, OOM or I/O errors. Together with the
+empty pstore, zero MCE and rails up: the failure is below everything that can log.
+
+### Correlations checked and rejected
+
+- **pve apt upgrades** (Sundays 02:00 plus ad-hoc): 2 of 7 resets fall within 24 h of one;
+  chance predicts 1.3 (those windows cover 19 % of the period). No signal.
+- **Time of day:** all seven resets fall between 06:41 and 20:20 (a 13.6 h window), ~3 % if
+  uniform. Found post hoc with n = 7 — noted, not acted on.
+
+### What changed in July
+
+| date | change |
+|---|---|
+| Jul 8 | **Unraid 7.3.1 → 7.3.2, kernel 6.18.33 → 6.18.38** |
+| Jul 23 | zfs modprobe config edit |
+| Jul 25 | `go2rtc_frontdoor` container (standalone go2rtc containers since removed — streams now in Frigate's own go2rtc block) |
+| Jul 30 | llama-server deployed |
+| Aug 3 22:12 | compose.manager plugin removed |
+| **Aug 4 06:41** | **first reset** |
+
+**The kernel is not implicated.** Upstream stable changelogs 6.18.34–6.18.38 and 6.18.39–6.18.47
+(the 7.4.0-beta.2 kernel) contain no ASPM, AER, DPC or link-reset changes, and every `i915`
+change is display-path — PSR/Panel Replay, eDP link rates, DP Adaptive Sync SDP, HDMI, VRR,
+HDCP — or GEM/context fixes. The A380 drives no panel. `drm/xe` changes do not apply (the card
+runs `i915`). Beyond the kernel, 7.3.2 changed Docker 29.5.2 → 29.5.3, ZFS 2.4.2 → 2.4.3,
+`CONFIG_USB_AUTOSUSPEND_DELAY=-1` (less aggressive PM), a WebGUI CVE and a cosmetic Intel GPU
+PCI-speed reporting fix. Also, 27 clean days on 6.18.38 preceded the first reset. Caveat:
+Unraid's own kernel patches are not in upstream changelogs. **The rollback to 7.3.1 (still in
+`/boot/previous`) was not pursued.** For the record, the `r8125` plugin has builds for
+6.18.33, 6.18.38 and 6.18.47, so a kernel move in either direction would not strand the NIC.
+
+### ⭐ The detector finding
+
+Frigate's `backup_config.yaml` (written 2026-06-24 21:07) versus the weekly appdata backup of
+2026-08-18 and the running config:
+
+```yaml
+# 2026-06-24
+detectors:
+  arc_gpu_1: {type: openvino, device: GPU}
+  arc_gpu_2: {type: openvino, device: GPU}
+  arc_gpu_3: {type: openvino, device: GPU}
+
+# 2026-08-18 through 2026-09-20 10:52
+detectors:
+  arc_gpu_1: {type: openvino, device: GPU.1}
+#  arc_gpu_2 / arc_gpu_3 commented out
+```
+
+OpenVINO's plain `GPU` is **GPU.0 — the UHD 770**. `GPU.1` is **the A380**. So object
+detection moved from the iGPU onto the A380 somewhere between **June 24 and August 18**, which
+brackets the August 4 onset. The Frigate+ model also changed in that window
+(`plus://ca4840…` → `plus://34b93b…`), and the genai `base_url` moved from `.80` to `.2`.
+
+**The exact date could not be recovered:** Frigate prunes events at 30 days, the appdata
+backups (`/mnt/user/appdata backup/`, weekly, 32-day retention) begin Aug 18, and the btrfs
+cache has no snapshots. The Frigate+ account's model history would pin it.
+
+**Why it matters:** detection ran on the A380 through **all seven resets, including the entire
+ollama watch.** The revert swapped the small intermittent workload (LLM calls) and never
+touched the large continuous one. That explains why it changed nothing.
+
+| era | accelerator doing continuous detection | resets |
+|---|---|---|
+| Coral dual-TPU (~4 W) | Coral PCIe card | daily |
+| A380 installed, detection on iGPU | none — A380 near idle | ~zero for 15 months |
+| After the switch to `GPU.1` | A380 | ~1 per 7 days |
+
+A 4 W card producing worse resets than a 50 W one argues against power *magnitude* (PSU,
+slot overdraw) and toward the *behaviour* the Coral and the working A380 share: sitting idle
+and bursting thousands of times an hour, cycling device power states. The HBA, which moves far
+more data but never idles down, has never been associated with a reset.
+
+### The change made — 2026-09-20 10:52
+
+```yaml
+detectors:
+  arc_gpu_1: {type: openvino, device: GPU}
+  arc_gpu_2: {type: openvino, device: GPU}
+```
+
+Verified live:
+
+| | A380 (03:00.0) | iGPU (00:02.0) |
+|---|---|---|
+| clock | **0 MHz** | 731–1240 MHz |
+| RC6 residency | **96–100 %** | 22–48 % |
+| engines | **all 0.00 %** | render 31–60 %, video 17–24 %, enhance 9–14 % |
+
+Inference 17.7–20.5 ms per detector (was 9.8 ms on the A380); `skipped_fps` 0.0 on all eight
+cameras; worst-case demand 8 cameras × 5 fps = 40/s against ~113/s capacity for two
+detectors. CPU package power rose from ~28 W to 36–44 W as inference moved into the package —
+**the power baseline for this watch is not comparable with earlier ones.**
+
+**Frigate's headline GPU % is not a saturation metric.** `frigate/util/services.py` (0.18.0)
+computes `min(100, render + compute) + min(100, video + video-enhance)`, capped at 100 — a sum
+of independent engines. It read ~93 % while the iGPU sat fully idle a third of the time. Judge
+headroom by `skipped_fps`, inference time and RC6 residency.
+
+### Hypothesis and watch
+
+> **The fault is triggered by the A380 doing continuous inference work, not by which software
+> drives it.** Mechanism unknown: slot power delivery, or power-state transition behaviour.
+
+- **Baseline:** boot 2026-09-20 07:56, config changed 10:52, **NVMe Unsafe Shutdowns {71, 61}**,
+  `parity-checks.log` as the confirming ledger.
+- **Duration:** to **2026-10-11**. Three clean weeks at ~1 per 7 d leaves ~5 % odds of coincidence.
+- **Falsifier:** another reset.
+- **Caveats:** a *partial* subtraction — GenAI (~200–400 calls/day) still runs on the A380. The
+  switch date is unknown; if it was late June, weeks of clean running followed and the story
+  weakens considerably. The 2024 cluster is unexplained by this, as by everything else.
+- **Do not install the new case, PSU or a board during the watch.** Parts may arrive; they stay
+  boxed until the watch reports.
