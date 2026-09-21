@@ -11,7 +11,10 @@ Investigated 2026-09-20. All timings local (CDT, UTC−5) unless marked.
 > moved from the iGPU onto the A380 between June 24 and August 18 — and stayed there through
 > every reset, including the ollama watch. Detection was moved back to the iGPU at 10:52, and
 > **that** is the live test (to 2026-10-11). The "What remains" ranking and "Recommendation"
-> below predate it: the PSU swap is deferred, not cancelled.
+> below predate it and are superseded. [Addendum 2](#addendum-2--2026-09-21-same-board-different-slots)
+> (2026-09-21) shows the Coral and the A380 failed on the same board in different slots: the
+> board/platform leads, the PSU is demoted and no longer a fix candidate, and the fix is to
+> keep detection on the iGPU.
 
 Continues [`crash-analysis-2026-09-12.md`](crash-analysis-2026-09-12.md), whose watch
 this closes. Its evidence-source findings (`parity-checks.log` as the reset ledger, the
