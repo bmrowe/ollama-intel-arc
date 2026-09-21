@@ -329,3 +329,52 @@ headroom by `skipped_fps`, inference time and RC6 residency.
   weakens considerably. The 2024 cluster is unexplained by this, as by everything else.
 - **Do not install the new case, PSU or a board during the watch.** Parts may arrive; they stay
   boxed until the watch reports.
+
+---
+
+## Addendum 2 — 2026-09-21: same board, different slots
+
+The detector finding left one question open: when the Coral and the A380 each produced a reset
+cluster, was it the same motherboard, and the same slot? The April 2025 Unraid diagnostics
+(`unraid-diagnostics-20250430-1735.zip`, taken in the Coral era) answer both.
+
+- **Same board:** `Gigabyte B760M GAMING X AX DDR4`, BIOS F19 (09/27/2024).
+- **No A380 installed.** The Coral dual Edge TPU (`1ac1:089a` ×2, behind an ASMedia ASM1182e
+  x1 Gen2 packet switch) was the only accelerator.
+- The Coral ran continuous detection through the **2024** cluster as well as 2025 (confirmed
+  by Bryan), so all three clusters coincide with a PCIe accelerator doing continuous detection
+  on this board.
+
+| slot | Coral era (Apr 2025) | now |
+|---|---|---|
+| CPU x16 (`00:01.0`) | LSI SAS2008 HBA | **A380** |
+| chipset (`00:1c.4`) | **Coral** | LSI SAS2008 HBA |
+
+The accelerator and the HBA **swapped slots between eras**. The accelerator's slot was
+associated with resets both times; the HBA — which moves far more data — never was, in either
+slot. (The 2025 mapping is inferred from sequential bus numbering; that `lspci` dump has no
+tree. It agrees with today's `lspci -t`.)
+
+**What this rules out:** a single bad slot (both the CPU-attached and chipset-attached paths are
+implicated), a specific card (two unrelated vendors and drivers, ~4 W and ~50 W), a specific
+BIOS (F19 and F25a), and "PCIe load" in general (the HBA).
+
+**Ranking now:** the **board / platform** leads. The CPU's PCIe and power-management side is the
+only other shared platform element, and a 65 W non-K i5 with no degradation history is a weak
+suspect. The **PSU is demoted** — a ~4 W card producing daily resets is not a supply-capacity
+problem — and is no longer a fix candidate.
+
+*Observation, not a theory:* both accelerators carry an onboard PCIe switch (the Coral's
+ASM1182e; the A380's internal `8086:4fa1` bridge). The HBA carries none.
+
+### The fix, and the rule that goes with it
+
+- **Detection stays on the iGPU.** It is the configuration the box ran cleanly for 15 months,
+  costs ~8–10 W of package power, and keeps up (0 skipped detections at 8 × 5 fps).
+- **Do not buy a new GPU or TPU for detection on this board.** It would reproduce the same
+  idle↔burst workload on the same platform. If an accelerator is wanted again, **replace the
+  board first**.
+- Intermittent GenAI on the A380 is being tested by this watch as a side effect: a clean run to
+  2026-10-11 with GenAI still on the card shows that workload is tolerable.
+- Recommended guardrails: a comment above Frigate's `detectors:` block pointing here, and a
+  boot-time alert when the NVMe Unsafe Shutdown count rises.
