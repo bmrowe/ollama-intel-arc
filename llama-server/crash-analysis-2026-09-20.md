@@ -10,11 +10,12 @@ Investigated 2026-09-20. All timings local (CDT, UTC−5) unless marked.
 > first.** Later the same day, Frigate's config history showed object detection had been
 > moved from the iGPU onto the A380 between June 24 and August 18 — and stayed there through
 > every reset, including the ollama watch. Detection was moved back to the iGPU at 10:52, and
-> **that** is the live test (to 2026-10-11). The "What remains" ranking and "Recommendation"
+> **that** is the live test (checkpoint 2026-10-11, confidence ≈ 2026-11-01). The "What remains" ranking and "Recommendation"
 > below predate it and are superseded. [Addendum 2](#addendum-2--2026-09-21-same-board-different-slots)
 > (2026-09-21) shows the Coral and the A380 failed on the same board in different slots: the
-> board/platform leads, the PSU is demoted and no longer a fix candidate, and the fix is to
-> keep detection on the iGPU.
+> board/platform leads, the PSU is demoted and no longer a fix candidate, and the working
+> hypothesis is that keeping detection on the iGPU avoids the trigger — a hypothesis under test,
+> not a demonstrated fix (a 22-day clean run already happened under the old configuration).
 
 Continues [`crash-analysis-2026-09-12.md`](crash-analysis-2026-09-12.md), whose watch
 this closes. Its evidence-source findings (`parity-checks.log` as the reset ledger, the
@@ -325,7 +326,10 @@ headroom by `skipped_fps`, inference time and RC6 residency.
 
 - **Baseline:** boot 2026-09-20 07:56, config changed 10:52, **NVMe Unsafe Shutdowns {71, 61}**,
   `parity-checks.log` as the confirming ledger.
-- **Duration:** to **2026-10-11**. Three clean weeks at ~1 per 7 d leaves ~5 % odds of coincidence.
+- **Duration:** checkpoint **2026-10-11**; confidence needs ~6 weeks, **≈ 2026-11-01**. (The
+  "~5 % odds after three weeks" figure originally given here assumed a steady rate and ignores a
+  22-day clean run under the old configuration — see
+  [Calibration](#calibration--what-a-clean-watch-can-and-cannot-show).)
 - **Falsifier:** another reset.
 - **Caveats:** a *partial* subtraction — GenAI (~200–400 calls/day) still runs on the A380. The
   switch date is unknown; if it was late June, weeks of clean running followed and the story
@@ -370,14 +374,43 @@ problem — and is no longer a fix candidate.
 *Observation, not a theory:* both accelerators carry an onboard PCIe switch (the Coral's
 ASM1182e; the A380's internal `8086:4fa1` bridge). The HBA carries none.
 
-### The fix, and the rule that goes with it
+### The working hypothesis, and the rule that goes with it
+
+This is the best-supported hypothesis so far, **not a demonstrated fix** — see
+[Calibration](#calibration--what-a-clean-watch-can-and-cannot-show) below.
 
 - **Detection stays on the iGPU.** It is the configuration the box ran cleanly for 15 months,
   costs ~8–10 W of package power, and keeps up (0 skipped detections at 8 × 5 fps).
 - **Do not buy a new GPU or TPU for detection on this board.** It would reproduce the same
   idle↔burst workload on the same platform. If an accelerator is wanted again, **replace the
   board first**.
-- Intermittent GenAI on the A380 is being tested by this watch as a side effect: a clean run to
-  2026-10-11 with GenAI still on the card shows that workload is tolerable.
+- Intermittent GenAI on the A380 is being tested by this watch as a side effect: a long clean
+  run with GenAI still on the card would suggest that workload is tolerable.
 - Recommended guardrails: a comment above Frigate's `detectors:` block pointing here, and a
   boot-time alert when the NVMe Unsafe Shutdown count rises.
+
+### Calibration — what a clean watch can and cannot show
+
+Every earlier mechanism in this investigation was stated with conviction and failed: the 6 d 6 h
+cadence, the power-transient / slot-overdraw derivation, C-states, DDR4-2666, `pcie_port_pm`,
+ASPM, and the ollama revert. The pattern was fitting a mechanism to the latest measurement. The
+detector hypothesis gets the same scrutiny.
+
+**Counter-evidence that must stay attached:** the **22-day clean run from Aug 16 to Sep 7
+happened with detection already on the A380** — the supposedly bad configuration. So a
+three-week clean watch is within what the old configuration has already done once. The
+"three clean weeks leaves ~5 % odds of coincidence" figure given above assumed a steady average
+rate and is **too generous**. Other open weaknesses: the date of the switch to `GPU.1` is
+unknown (a late-June switch would mean weeks of clean running afterwards and a much weaker
+timing link), the fault is episodic and has gone quiet on its own before, and the evidence is
+three clusters.
+
+**Decision points:**
+- **2026-10-11 is a checkpoint, not a verdict.** A reset before then falsifies the hypothesis;
+  a clean run means only "consistent with".
+- **Confidence needs ~6 weeks clean — about 2026-11-01** — twice the longest clean interval
+  observed under the old configuration.
+- **If a reset recurs:** first take the A380 fully out of service (GenAI off it, or pull the
+  card) — free, and the only subtraction not yet made. Only then consider a board.
+
+Do not describe this change as "the fix" before that point.
