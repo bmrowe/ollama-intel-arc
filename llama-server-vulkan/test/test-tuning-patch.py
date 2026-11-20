@@ -11,7 +11,8 @@ when the Vulkan library loads; file values override the environment, KEY= unsets
   GGML_VK_{L,M,S}_WARPTILE_MMQ     override quantized matmul warptiles (11 values)
   GGML_VK_PRINT_WARPTILES=1        print the warptiles in use
   GGML_VK_HYBRID_INT=1             with matrix cores on, also create the int8 dot-product
-                                   (Q8_1) pipelines so quantized types keep that path
+                                   (Q8_1) pipelines so quantized types keep that path; on Intel
+                                   the int8 large tile stays off (GGML_VK_HYBRID_INT_ALLOW_L=1 keeps it)
   GGML_VK_LOG_MATMUL=1             print the pipeline, workgroup size and split_k chosen for
                                    each distinct quantized/f16 matmul shape (once per shape)
 
@@ -188,6 +189,13 @@ hybrid = """#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
                 }
             };
             std::cerr << "ggml_vulkan: hybrid int8 dot-product pipelines enabled" << std::endl;
+            if (device->vendor_id == VK_VENDOR_ID_INTEL && getenv("GGML_VK_HYBRID_INT_ALLOW_L") == nullptr) {
+                // Intel enables l tiles only with coopmat; keep the int8 path on s/m as without coopmat.
+                for (uint32_t t = 0; t < GGML_TYPE_COUNT; ++t) {
+                    device->mul_mat_l_int[t] = false;
+                    device->mul_mat_id_l_int[t] = false;
+                }
+            }
 """ + int_block + """        }
 #endif
 """
