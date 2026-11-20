@@ -12,6 +12,8 @@ when the Vulkan library loads; file values override the environment, KEY= unsets
   GGML_VK_PRINT_WARPTILES=1        print the warptiles in use
   GGML_VK_HYBRID_INT=1             with matrix cores on, also create the int8 dot-product
                                    (Q8_1) pipelines so quantized types keep that path
+  GGML_VK_LOG_MATMUL=1             print the pipeline, workgroup size and split_k chosen for
+                                   each distinct quantized/f16 matmul shape (once per shape)
 
 Warptile order (mul_mm.comp spec constants): BLOCK_SIZE, BM, BN, BK, WM, WN, WMITER,
 TM, TN, TK, WARP (WARP is also the required subgroup size). Workgroup denominators
@@ -31,6 +33,7 @@ def replace_once(text, old, new, what):
 
 # 1. Load the tuning file into the environment when the library loads.
 loader = r'''#include <cstdlib>
+#include <set>
 #include <fstream>
 // [test patch] load KEY=VALUE overrides before any device is created
 static const int ggml_vk_tuning_file_loaded = []() {
@@ -143,6 +146,22 @@ src = replace_once(
     block,
     "use_cm1_int definition",
 )
+
+# 5. Log the matmul pipeline choice once per shape.
+log_anchor = "    const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k, pipeline, narrow_n);\n\n    const uint64_t qx_sz"
+log_code = """    const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k, pipeline, narrow_n);
+    if (getenv("GGML_VK_LOG_MATMUL") != nullptr) {
+        static std::set<std::string> seen;
+        std::string key = std::string(ggml_type_name(src0->type)) + " m=" + std::to_string(ne01) + " n=" + std::to_string(ne11) + " k=" + std::to_string(ne10);
+        if (seen.insert(key).second) {
+            std::cerr << "ggml_vulkan: matmul " << key << " y=" << ggml_type_name(y_kernel_type) << " pipeline=" << pipeline->name
+                      << " wg=" << pipeline->wg_denoms[0] << "x" << pipeline->wg_denoms[1] << " split_k=" << split_k
+                      << " dequant_x=" << qx_needs_dequant << " aligned=" << aligned << std::endl;
+        }
+    }
+
+    const uint64_t qx_sz"""
+src = replace_once(src, log_anchor, log_code, "split_k anchor in mul_mat_q_f16")
 
 # 4. Hybrid: create the int8 dot-product (Q8_1) matmul pipelines in the coopmat branch too.
 int_start = "            if (device->integer_dot_product) {\n                std::vector<vk_tile_config> tc_mmq_int = "
