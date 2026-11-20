@@ -1,0 +1,13 @@
+# Same patched llama-server, with Mesa from the kisak PPA instead of Ubuntu's.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends software-properties-common gpg-agent \
+ && add-apt-repository -y ppa:kisak/kisak-mesa \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 \
+ && apt-get purge -y software-properties-common gpg-agent \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && dpkg -l mesa-vulkan-drivers | grep -q kisak

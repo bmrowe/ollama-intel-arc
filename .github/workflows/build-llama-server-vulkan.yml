@@ -1,0 +1,74 @@
+name: Build and push llama-server-vulkan-unraid
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_ref:
+        description: "llama.cpp git ref (tag, branch or SHA); empty = latest release"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve llama.cpp ref
+        id: ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_REF: ${{ inputs.llama_ref }}
+        run: |
+          if [ -n "$INPUT_REF" ]; then ref="$INPUT_REF"; else ref=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq .tag_name); fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "llama.cpp ref: $ref"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ steps.ref.outputs.ref }}
+          path: llama.cpp
+
+      - name: Patch in the opt-in matrix-core switch
+        run: python3 llama-server-vulkan/force-coopmat.py llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+
+      - name: Log into GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push (Ubuntu Mesa)
+        uses: docker/build-push-action@v7
+        with:
+          context: llama.cpp
+          file: llama.cpp/.devops/vulkan.Dockerfile
+          target: server
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.ref.outputs.ref }}
+          tags: |
+            ghcr.io/bmrowe/llama-server-vulkan-unraid:mesa-ubuntu
+            ghcr.io/bmrowe/llama-server-vulkan-unraid:mesa-ubuntu-${{ steps.ref.outputs.ref }}
+
+      - name: Build and push (kisak Mesa)
+        uses: docker/build-push-action@v7
+        with:
+          context: llama-server-vulkan
+          file: llama-server-vulkan/Dockerfile.mesa
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/bmrowe/llama-server-vulkan-unraid:mesa-ubuntu-${{ steps.ref.outputs.ref }}
+          tags: |
+            ghcr.io/bmrowe/llama-server-vulkan-unraid:mesa-kisak
+            ghcr.io/bmrowe/llama-server-vulkan-unraid:mesa-kisak-${{ steps.ref.outputs.ref }}
