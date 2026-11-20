@@ -151,6 +151,12 @@ if i < 0:
     sys.exit("test-tuning-patch: int pipeline block not found")
 j = src.find("            }\n#endif", i)
 int_block = src[i:j + len("            }\n")].replace("sg_create_mmq(", "hy_create_mmq(")
+# The int pipelines keep their own tile sizes, so give them matching workgroup denominators
+# instead of the coopmat ones (which the overrides may have changed).
+for size in ("s", "m", "l"):
+    for suffix in ("", "_k"):
+        wt = f"{size}_warptile_mmq_int{suffix}"
+        int_block = int_block.replace(f"{{{wt}, {size}_mmq_wg_denoms,", f"{{{wt}, {{{wt}[1], {wt}[2], 1}},")
 hybrid = """#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
         if (getenv("GGML_VK_HYBRID_INT") != nullptr) {
             auto hy_create_mmq = [&](vk_matmul_pipeline_key key, const std::vector<vk_tile_config>& tc_base,
