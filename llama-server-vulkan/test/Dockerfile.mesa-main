@@ -1,0 +1,29 @@
+# TEST ONLY: Mesa's Intel Vulkan driver (ANV) built from a git ref, installed
+# side by side in /opt/mesa-main on top of the matrix-core test image.
+# Select it per process with:
+#   VK_DRIVER_FILES=/opt/mesa-main/share/vulkan/icd.d/intel_icd.x86_64.json
+# Without that variable the image's own Mesa is used, so one image A/B tests both.
+ARG BASE_IMAGE=ghcr.io/bmrowe/llama-server-vulkan-unraid:mesa-ubuntu-v1.0.0
+
+FROM docker.io/ubuntu:26.04 AS mesa
+ARG MESA_REF=main
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get update \
+ && apt-get build-dep -y mesa \
+ && apt-get install -y --no-install-recommends git ca-certificates
+RUN git clone --depth 1 --branch "$MESA_REF" https://gitlab.freedesktop.org/mesa/mesa.git /src \
+ && git -C /src log -1 --format='mesa %H %cs %s' | tee /mesa-commit.txt
+WORKDIR /src
+RUN meson setup build --prefix=/opt/mesa-main --libdir=lib -Dbuildtype=release \
+      -Dvulkan-drivers=intel -Dgallium-drivers= -Dplatforms= \
+      -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false \
+      -Dgles1=disabled -Dgles2=disabled \
+ && ninja -C build install \
+ && cp /mesa-commit.txt /opt/mesa-main/
+
+FROM ${BASE_IMAGE}
+COPY --from=mesa /opt/mesa-main /opt/mesa-main
+RUN missing=$(ldd /opt/mesa-main/lib/libvulkan_intel.so | grep "not found" || true); \
+    if [ -n "$missing" ]; then echo "$missing"; exit 1; fi; \
+    cat /opt/mesa-main/mesa-commit.txt
