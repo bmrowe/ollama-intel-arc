@@ -3,7 +3,7 @@
 llama.cpp's Vulkan server with two changes for Intel Arc Alchemist (A-series, DG2) cards:
 
 1. **`intel-alchemist-coopmat.patch`** turns on KHR cooperative matrices (XMX matrix
-   cores) for Alchemist discrete GPUs on Mesa, and gives them smaller matmul tiles.
+   cores) for Alchemist discrete GPUs on Mesa, and gives them smaller large and medium matmul tiles.
    Upstream leaves matrix cores off on these cards because its Xe1 tiles (32x32 per
    subgroup) spill hundreds of registers per shader, which made them much slower.
    With 16x16 per subgroup at SIMD8 the shaders compile without spills.
@@ -31,6 +31,12 @@ patch stops applying, the build fails and `:latest` stays on the last good image
 Server request with three 500x500 images (image encoding + prompt, median):
 5.29 s with matrix cores off, 3.80 s with this patch. The gain comes from the F16
 vision encoder; quantized matmul only ties the integer dot-product path.
+
+The medium tiles got the same change after `test-backend-ops perf` showed a cliff at n=33
+(q4_K 0.21x vs matrix cores off, 0.84-0.93x after). `test-backend-ops -o MUL_MAT,MUL_MAT_ID`
+passes 3762/3762 with both changes. Mid-size quantized batches (n=9-32) are still about
+0.5-0.7x of the int8 dot-product path, because llama.cpp does not create those pipelines
+when matrix cores are on.
 
 Per-shader spill counts came from `INTEL_DEBUG=cs` with `MESA_SHADER_CACHE_DISABLE=true`.
 `test/` holds the test-only patch used to find the tiles (env and file overrides).
