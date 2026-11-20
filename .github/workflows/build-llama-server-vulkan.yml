@@ -12,7 +12,8 @@ on:
   push:
     branches: [main]
     paths:
-      - llama-server-vulkan/**
+      - llama-server-vulkan/Dockerfile
+      - llama-server-vulkan/intel-alchemist-coopmat.patch
       - .github/workflows/build-llama-server-vulkan.yml
 
 permissions:
@@ -20,35 +21,48 @@ permissions:
   packages: write
 
 env:
-  BASE: ghcr.io/ggml-org/llama.cpp:server-vulkan
+  UPSTREAM: ghcr.io/ggml-org/llama.cpp:server-vulkan
   IMAGE: ghcr.io/bmrowe/llama-server-vulkan-unraid
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Check upstream image and kisak Mesa
+      - name: Check upstream build, kisak Mesa and patch
         id: check
         run: |
-          base_digest=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -r .digest)
+          image_json=$(docker buildx imagetools inspect "$UPSTREAM" --format '{{json .Image}}')
+          rev=$(echo "$image_json" | jq -r 'if .config then .config.Labels["org.opencontainers.image.revision"] else .["linux/amd64"].config.Labels["org.opencontainers.image.revision"] end')
           mesa=$(curl -fsSL https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu/dists/resolute/main/binary-amd64/Packages.xz \
             | xz -dc | awk '/^Package: mesa-vulkan-drivers$/{p=1} p&&/^Version:/{print $2; exit}')
-          current=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
-            | jq -r '(.config.Labels["io.github.bmrowe.base-digest"] // "") + " " + (.config.Labels["io.github.bmrowe.mesa-version"] // "")' || true)
-          echo "upstream $base_digest, kisak mesa $mesa, published: ${current:-none}"
-          echo "base_digest=$base_digest" >> "$GITHUB_OUTPUT"
-          echo "mesa=$mesa" >> "$GITHUB_OUTPUT"
-          if [ "$current" = "$base_digest $mesa" ] && [ "${{ inputs.force }}" != "true" ] && [ "${{ github.event_name }}" != "push" ]; then
+          patch_sha=$(sha256sum llama-server-vulkan/intel-alchemist-coopmat.patch | cut -c1-12)
+          want="$rev $mesa $patch_sha"
+          have=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
+            | jq -r '[.config.Labels["io.github.bmrowe.llama-revision"], .config.Labels["io.github.bmrowe.mesa-version"], .config.Labels["io.github.bmrowe.patch-sha"]] | join(" ")' || true)
+          echo "want: $want"; echo "have: ${have:-none}"
+          { echo "rev=$rev"; echo "mesa=$mesa"; echo "patch_sha=$patch_sha"; } >> "$GITHUB_OUTPUT"
+          if [ "$want" = "$have" ] && [ "${{ inputs.force }}" != "true" ] && [ "${{ github.event_name }}" != "push" ]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.build == 'true'
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ steps.check.outputs.rev }}
+          path: llama.cpp
+
+      - name: Apply Alchemist matrix-core patch
+        if: steps.check.outputs.build == 'true'
+        run: git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
 
       - name: Log into GHCR
         if: steps.check.outputs.build == 'true'
@@ -58,16 +72,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build patched llama.cpp server
+        if: steps.check.outputs.build == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: llama.cpp
+          file: llama.cpp/.devops/vulkan.Dockerfile
+          target: server
+          push: true
+          provenance: false
+          build-args: |
+            APP_REVISION=${{ steps.check.outputs.rev }}
+          tags: ${{ env.IMAGE }}:base
+
+      - name: Add kisak Mesa and publish
         if: steps.check.outputs.build == 'true'
         uses: docker/build-push-action@v7
         with:
           context: llama-server-vulkan
           push: true
-          provenance: false  # single manifest, so the label check above can read it
+          provenance: false
           build-args: |
-            BASE_IMAGE=${{ env.BASE }}@${{ steps.check.outputs.base_digest }}
-            BASE_DIGEST=${{ steps.check.outputs.base_digest }}
+            BASE_IMAGE=${{ env.IMAGE }}:base
           labels: |
+            io.github.bmrowe.llama-revision=${{ steps.check.outputs.rev }}
             io.github.bmrowe.mesa-version=${{ steps.check.outputs.mesa }}
+            io.github.bmrowe.patch-sha=${{ steps.check.outputs.patch_sha }}
           tags: ${{ env.IMAGE }}:latest
