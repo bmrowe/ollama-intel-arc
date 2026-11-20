@@ -6,6 +6,11 @@ on:
       llama_ref:
         description: "llama.cpp git ref (full SHA, tag or branch)"
         required: true
+      patch:
+        description: "production = intel-alchemist-coopmat.patch; tuning = test/test-tuning-patch.py (env/file tile overrides)"
+        type: choice
+        options: [production, tuning]
+        default: production
 
 permissions:
   contents: read
@@ -24,8 +29,13 @@ jobs:
           ref: ${{ inputs.llama_ref }}
           path: llama.cpp
 
-      - name: Apply Alchemist matrix-core patch
-        run: git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
+      - name: Apply patch
+        run: |
+          if [ "${{ inputs.patch }}" = tuning ]; then
+            python3 llama-server-vulkan/test/test-tuning-patch.py llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+          else
+            git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
+          fi
 
       - name: Log into GHCR
         uses: docker/login-action@v4
@@ -44,4 +54,4 @@ jobs:
           file: llama-server-vulkan/test/Dockerfile.backend-ops
           push: true
           provenance: false
-          tags: ghcr.io/bmrowe/llama-server-vulkan-unraid:test-backend-ops
+          tags: ghcr.io/bmrowe/llama-server-vulkan-unraid:test-backend-ops${{ inputs.patch == 'tuning' && '-tuning' || '' }}
