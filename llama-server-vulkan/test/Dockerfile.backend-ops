@@ -1,0 +1,27 @@
+# TEST ONLY: llama.cpp's test-backend-ops (Vulkan), built from a patched checkout,
+# on Ubuntu 26.04 with kisak Mesa. Run with --device /dev/dri/renderDXXX.
+FROM docker.io/ubuntu:26.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
+      libvulkan-dev glslc spirv-headers libssl-dev
+WORKDIR /src
+COPY . .
+RUN cmake -B build -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF \
+      -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DGGML_BACKEND_DL=OFF \
+ && cmake --build build --config Release --target test-backend-ops -j"$(nproc)" \
+ && mkdir -p /out && cp build/bin/test-backend-ops /out/ \
+ && find build -name "*.so*" -exec cp -P {} /out/ \;
+
+FROM docker.io/ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends software-properties-common gpg-agent libgomp1 \
+ && add-apt-repository -y ppa:kisak/kisak-mesa \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/ /app/
+ENV LD_LIBRARY_PATH=/app
+WORKDIR /app
+ENTRYPOINT ["/app/test-backend-ops"]
