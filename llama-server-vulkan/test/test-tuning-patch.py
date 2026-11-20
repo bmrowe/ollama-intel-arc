@@ -10,6 +10,8 @@ when the Vulkan library loads; file values override the environment, KEY= unsets
   GGML_VK_{L,M,S}_WARPTILE         override f16/f32 matmul warptiles (11 values)
   GGML_VK_{L,M,S}_WARPTILE_MMQ     override quantized matmul warptiles (11 values)
   GGML_VK_PRINT_WARPTILES=1        print the warptiles in use
+  GGML_VK_HYBRID_INT=1             with matrix cores on, also create the int8 dot-product
+                                   (Q8_1) pipelines so quantized types keep that path
 
 Warptile order (mul_mm.comp spec constants): BLOCK_SIZE, BM, BN, BK, WM, WN, WMITER,
 TM, TN, TK, WARP (WARP is also the required subgroup size). Workgroup denominators
@@ -141,6 +143,31 @@ src = replace_once(
     block,
     "use_cm1_int definition",
 )
+
+# 4. Hybrid: create the int8 dot-product (Q8_1) matmul pipelines in the coopmat branch too.
+int_start = "            if (device->integer_dot_product) {\n                std::vector<vk_tile_config> tc_mmq_int = "
+i = src.find(int_start)
+if i < 0:
+    sys.exit("test-tuning-patch: int pipeline block not found")
+j = src.find("            }\n#endif", i)
+int_block = src[i:j + len("            }\n")].replace("sg_create_mmq(", "hy_create_mmq(")
+hybrid = """#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+        if (getenv("GGML_VK_HYBRID_INT") != nullptr) {
+            auto hy_create_mmq = [&](vk_matmul_pipeline_key key, const std::vector<vk_tile_config>& tc_base,
+                                     const std::string& name, size_t len, const void* data, uint32_t pc_size, uint32_t pc,
+                                     uint32_t rsgs = 0) {
+                auto tc = filter_tc(tc_base, key.type_a, key.mul_mat_id, true);
+                if (!tc.empty()) {
+                    spec_fn_t identity = [](const std::vector<uint32_t>& wt, bool) { return wt; };
+                    create_mm_pipelines(key, tc, name, len, data, pc_size, pc, identity, false, rsgs > 0, rsgs, false);
+                }
+            };
+            std::cerr << "ggml_vulkan: hybrid int8 dot-product pipelines enabled" << std::endl;
+""" + int_block + """        }
+#endif
+"""
+anchor = "    } else\n#endif  // defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)\n    {\n        // Helper for subgroup path"
+src = replace_once(src, anchor, hybrid + anchor, "coopmat branch end")
 
 open(path, "w", encoding="utf-8").write(src)
 print("test-tuning-patch: patched", path)
