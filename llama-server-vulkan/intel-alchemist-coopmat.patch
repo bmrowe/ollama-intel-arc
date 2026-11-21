@@ -1,20 +1,20 @@
 diff --git a/ggml/src/ggml-vulkan/ggml-vulkan-push-constants.h b/ggml/src/ggml-vulkan/ggml-vulkan-push-constants.h
-index caa852e28..33f15428f 100644
+index 7a48c08dc..e5a793b4b 100644
 --- a/ggml/src/ggml-vulkan/ggml-vulkan-push-constants.h
 +++ b/ggml/src/ggml-vulkan/ggml-vulkan-push-constants.h
-@@ -13,6 +13,7 @@ struct vk_mat_mat_push_constants {
-     uint32_t k_split;
-     uint32_t ne02; uint32_t ne12; uint32_t broadcast2; uint32_t broadcast3;
-     uint32_t padded_N;
+@@ -24,6 +24,7 @@ struct vk_mat_mat_push_constants {
+     uint32_t broadcast3_mp;
+     uint32_t div_Ls0;
+     uint32_t div_Ls1;
 +    uint32_t fuse_bias;
  };
  
- struct vk_mat_vec_push_constants {
+ struct vk_mat_mat_stream_k_fixup_push_constants {
 diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-index b5b4264fb..593d82559 100644
+index cc0071033..75a3e6ab2 100644
 --- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 +++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-@@ -2120,7 +2120,16 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+@@ -2148,7 +2148,16 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
          if (device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support) {
              // Xe1/Xe2/Xe3 with coopmat enabled - warptile performance tuning
              l_warptile = { 512, 128, 128, 16, mm_warp_8, 32, 2, tm_l, tn_l, tk_l, mm_warp_8 };
@@ -32,25 +32,18 @@ index b5b4264fb..593d82559 100644
                  l_warptile_mmq  = { 512, 256, 128, 32, 32, 32, 2, tm_l, tn_l, tk_l, 16 };
                  l_mmq_wg_denoms = { 256, 128, 1 };
                  l_align         = 32;  //set as BK
-@@ -2471,11 +2480,16 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
-         const vk_matmul_pipeline_key& key,
-         const std::vector<vk_tile_config>& tile_configs,
-         const std::string& shader_name, size_t spv_len, const void* spv_data,
--        uint32_t push_constant_size, uint32_t param_count,
-+        uint32_t push_constant_size, uint32_t param_count_in,
-         const spec_fn_t& spec_fn,
-         bool disable_robustness = false, bool require_full_subgroups = false, uint32_t required_subgroup_size = 0,
-         bool create_aligned = true, bool pin_subgroup_to_warp = false
-     ) {
-+        uint32_t param_count = param_count_in;
-+        // non-ID matmuls with a float/f16 B operand (mul_mm.comp) take a 4th binding for a fused bias
-+        if (!key.mul_mat_id && key.type_b != GGML_TYPE_Q8_1 && param_count == 3) {
-+            param_count = 4;
+@@ -2510,6 +2519,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+         if (!key.mul_mat_id) {
+             ++param_count;
+         }
++        // mul_mm.comp (non-ID, float/f16 B) also declares a binding for a fused bias
++        if (!key.mul_mat_id && key.type_b != GGML_TYPE_Q8_1) {
++            ++param_count;
 +        }
          auto& vec = device->pipeline_matmul[key];
          const bool first_call = vec.empty();
          for (size_t i = 0; i < tile_configs.size(); i++) {
-@@ -2896,6 +2910,40 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+@@ -2951,6 +2964,40 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
              cm1_create_mmq({GGML_TYPE_Q6_K,   GGML_TYPE_Q8_1, true, false}, tc_mmq_cm1_int_k, "matmul_id_subgroup_q6_k_q8_1",   matmul_id_subgroup_q6_k_q8_1_cm1_len,   matmul_id_subgroup_q6_k_q8_1_cm1_data,   sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
              if (!rdna4) { cm1_create_mmq({GGML_TYPE_NVFP4, GGML_TYPE_Q8_1, true, false}, tc_mmq_cm1_int_k, "matmul_id_subgroup_nvfp4_q8_1",  matmul_id_subgroup_nvfp4_q8_1_cm1_len,  matmul_id_subgroup_nvfp4_q8_1_cm1_data,  sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count); }
          }
@@ -91,7 +84,7 @@ index b5b4264fb..593d82559 100644
      } else
  #endif  // defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
      {
-@@ -3330,6 +3378,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+@@ -3390,6 +3437,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
              if (device->integer_dot_product) {
                  const uint32_t subgroup_size_int = (device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control) ? device->subgroup_min_size : device->subgroup_size;
                  const uint32_t wg_size_subgroup_int = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_int : (subgroup_size_int * 4);
@@ -102,7 +95,7 @@ index b5b4264fb..593d82559 100644
  
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q2_0][i], "mul_mat_vec_q2_0_q8_1_f32", arr_dmmv_q2_0_q8_1_f32_len[reduc], arr_dmmv_q2_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(2*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(2*rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_0][i], "mul_mat_vec_q4_0_q8_1_f32", arr_dmmv_q4_0_q8_1_f32_len[reduc], arr_dmmv_q4_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
-@@ -3344,7 +3396,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+@@ -3404,7 +3455,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q3_K][i], "mul_mat_vec_q3_k_q8_1_f32", arr_dmmv_q3_k_q8_1_f32_len[reduc], arr_dmmv_q3_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_K][i], "mul_mat_vec_q4_k_q8_1_f32", arr_dmmv_q4_k_q8_1_f32_len[reduc], arr_dmmv_q4_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q5_K][i], "mul_mat_vec_q5_k_q8_1_f32", arr_dmmv_q5_k_q8_1_f32_len[reduc], arr_dmmv_q5_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_int);
@@ -111,7 +104,7 @@ index b5b4264fb..593d82559 100644
  
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_IQ1_S][i], "mul_mat_vec_iq1_s_q8_1_f32", arr_dmmv_iq1_s_q8_1_f32_len[reduc], arr_dmmv_iq1_s_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_iq_int(i), 1, 1}, {wg_size_subgroup_int, 1*rm_iq_int(i), i+1}, 1, true, use_subgroups, subgroup_size_int);
                  ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_IQ1_M][i], "mul_mat_vec_iq1_m_q8_1_f32", arr_dmmv_iq1_m_q8_1_f32_len[reduc], arr_dmmv_iq1_m_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_iq_int(i), 1, 1}, {wg_size_subgroup_int, 1*rm_iq_int(i), i+1}, 1, true, use_subgroups, subgroup_size_int);
-@@ -5303,7 +5355,7 @@ vk_device ggml_vk_get_device(size_t idx) {
+@@ -5523,7 +5574,7 @@ vk_device ggml_vk_get_device(size_t idx) {
  #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
          device->xe_fa_support = device->coopmat_support && device->properties.limits.maxComputeSharedMemorySize >= 48 * 1024 &&
                                  device->workgroup_memory_explicit_layout && device->workgroup_memory_explicit_layout_16bit &&
@@ -120,49 +113,60 @@ index b5b4264fb..593d82559 100644
                                   (device->subgroup_size == 32 && device->coopmat_support_16x16x16_f32acc && (getenv("GGML_VK_FORCE_XE_FA") != nullptr)));
  #endif
  
-@@ -6379,7 +6431,9 @@ void ggml_vk_matmul(
+@@ -6681,7 +6732,9 @@ void ggml_vk_matmul(
          uint32_t m, uint32_t n, uint32_t k, uint32_t stride_a, uint32_t stride_b, uint32_t stride_d,
          uint32_t batch_stride_a, uint32_t batch_stride_b, uint32_t batch_stride_d,
-         uint32_t split_k, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3,
+         uint32_t split_k, uint32_t stream_k_groups, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3,
 -        uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes) {
 +        uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes, const vk_subbuffer * bias = nullptr) {
-+    GGML_ASSERT(bias == nullptr || pipeline->parameter_count == 4);
++    GGML_ASSERT(bias == nullptr || (pipeline->parameter_count == 5 && stream_k_groups == 0));
 +    const uint32_t fuse_bias = bias != nullptr ? 1u : 0u;
          VK_LOG_DEBUG("ggml_vk_matmul(a: (" << a.buffer->buffer << ", " << a.offset << ", " << a.size << "), b: (" << b.buffer->buffer << ", " << b.offset << ", " << b.size << "), d: (" << d.buffer->buffer << ", " << d.offset << ", " << d.size << "), split_k: (" << (split_k_buffer.buffer != nullptr ? split_k_buffer.buffer->buffer : VK_NULL_HANDLE) << ", " << split_k_buffer.offset << ", " << split_k_buffer.size << "), m: " << m << ", n: " << n << ", k: " << k << ", stride_a: " << stride_a << ", stride_b: " << stride_b << ", stride_d: " << stride_d << ", batch_stride_a: " << batch_stride_a << ", batch_stride_b: " << batch_stride_b << ", batch_stride_d: " << batch_stride_d << ", split_k: " << split_k << ", batch: " << batch << ", ne02: " << ne02 << ", ne12: " << ne12 << ", broadcast2: " << broadcast2 << ", broadcast3: " << broadcast3 << ", padded_n: " << padded_n << ")");
-     if (split_k == 1) {
-         // a small tile can still produce more workgroups than the device allows on the n axis:
-@@ -6403,8 +6457,12 @@ void ggml_vk_matmul(
-             while (base_work_group_z < batch) {
-                 uint32_t groups_z = std::min(batch - base_work_group_z, ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
+     if (stream_k_groups != 0) {
+         GGML_ASSERT(batch_stride_d == m * n);
+@@ -6708,7 +6761,11 @@ void ggml_vk_matmul(
+         };
+         init_pushconst_fastdiv(pc1, blocks_m, blocks_n);
  
--                const vk_mat_mat_push_constants pc = { m, n_chunk, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k, ne02, ne12, broadcast2, broadcast3, uint32_t(padded_n - n_base) };
--                ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk }, pc, { m, n_chunk, groups_z });
-+                const vk_mat_mat_push_constants pc = { m, n_chunk, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k, ne02, ne12, broadcast2, broadcast3, uint32_t(padded_n - n_base), fuse_bias };
-+                if (pipeline->parameter_count == 4) {
-+                    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk, bias != nullptr ? *bias : d_chunk }, pc, { m, n_chunk, groups_z });
+-        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, split_k_buffer }, pc1, { stream_k_groups * pipeline->wg_denoms[0], 1, 1 });
++        if (pipeline->parameter_count == 5) {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, split_k_buffer, d }, pc1, { stream_k_groups * pipeline->wg_denoms[0], 1, 1 });
++        } else {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, split_k_buffer }, pc1, { stream_k_groups * pipeline->wg_denoms[0], 1, 1 });
++        }
+         ggml_vk_sync_buffers(ctx, subctx);
+ 
+         vk_mat_mat_stream_k_fixup_push_constants pc2 = {
+@@ -6749,7 +6806,12 @@ void ggml_vk_matmul(
+                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                 };
+                 init_pushconst_fastdiv(pc);
+-                ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk, d_chunk }, pc, { m, n_chunk, groups_z });
++                pc.fuse_bias = fuse_bias;
++                if (pipeline->parameter_count == 5) {
++                    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk, d_chunk, bias != nullptr ? *bias : d_chunk }, pc, { m, n_chunk, groups_z });
 +                } else {
-+                    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk }, pc, { m, n_chunk, groups_z });
++                    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b_chunk, d_chunk, d_chunk }, pc, { m, n_chunk, groups_z });
 +                }
                  base_work_group_z += groups_z;
              }
          }
-@@ -6427,9 +6485,13 @@ void ggml_vk_matmul(
-     while (base_work_group_z < batch) {
-         uint32_t groups_z = std::min(batch - base_work_group_z, ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
- 
--        const vk_mat_mat_push_constants pc1 = { m, n, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k_split, ne02, ne12, broadcast2, broadcast3, padded_n };
-+        const vk_mat_mat_push_constants pc1 = { m, n, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d, base_work_group_z, batch, k_split, ne02, ne12, broadcast2, broadcast3, padded_n, fuse_bias };
+@@ -6777,8 +6839,13 @@ void ggml_vk_matmul(
+             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+         };
+         init_pushconst_fastdiv(pc1);
++        pc1.fuse_bias = fuse_bias;
          // Make sure enough workgroups get assigned for split k to work
--        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
-+        if (pipeline->parameter_count == 4) {
-+            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer, bias != nullptr ? *bias : d }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
+-        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer, split_k_buffer }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
++        if (pipeline->parameter_count == 5) {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer, split_k_buffer, bias != nullptr ? *bias : split_k_buffer }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
 +        } else {
-+            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, split_k_buffer, split_k_buffer }, pc1, { (CEIL_DIV(m, pipeline->wg_denoms[0]) * pipeline->wg_denoms[0]) * split_k, n, groups_z });
 +        }
          base_work_group_z += groups_z;
      }
      ggml_vk_sync_buffers(ctx, subctx);
-@@ -6797,7 +6859,8 @@ static ggml_type ggml_vk_mul_mat_b_type(
+@@ -7147,7 +7214,8 @@ static ggml_type ggml_vk_mul_mat_b_type(
      return f16_type;
  }
  
@@ -172,7 +176,7 @@ index b5b4264fb..593d82559 100644
      VK_LOG_DEBUG("ggml_vk_mul_mat_q_f16((" << src0 << ", name=" << src0->name << ", type=" << ggml_type_name(src0->type) << ", ne0=" << src0->ne[0] << ", ne1=" << src0->ne[1] << ", ne2=" << src0->ne[2] << ", ne3=" << src0->ne[3] << ", nb0=" << src0->nb[0] << ", nb1=" << src0->nb[1] << ", nb2=" << src0->nb[2] << ", nb3=" << src0->nb[3];
      std::cerr << "), (" << src1 << ", name=" << src1->name << ", type=" << ggml_type_name(src1->type) << ", ne0=" << src1->ne[0] << ", ne1=" << src1->ne[1] << ", ne2=" << src1->ne[2] << ", ne3=" << src1->ne[3] << ", nb0=" << src1->nb[0] << ", nb1=" << src1->nb[1] << ", nb2=" << src1->nb[2] << ", nb3=" << src1->nb[3];
      std::cerr << "), (" << dst << ", name=" << dst->name << ", type=" << ggml_type_name(dst->type) << ", ne0=" << dst->ne[0] << ", ne1=" << dst->ne[1] << ", ne2=" << dst->ne[2] << ", ne3=" << dst->ne[3] << ", nb0=" << dst->nb[0] << ", nb1=" << dst->nb[1] << ", nb2=" << dst->nb[2] << ", nb3=" << dst->nb[3];
-@@ -6954,10 +7017,15 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+@@ -7327,10 +7395,15 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
          }
      }
  
@@ -190,16 +194,16 @@ index b5b4264fb..593d82559 100644
      vk_buffer d_X;
      uint64_t x_buf_offset = 0;
      vk_buffer d_Y;
-@@ -7061,7 +7129,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+@@ -7434,7 +7507,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
          ne01, ne11, ne10,
          ne10, ne10, stride_d, stride_batch_x, stride_batch_y, stride_batch_d,
-         split_k, ne12*ne13, ne02, ne12, r2, r3, padded_n,
+         split_k, stream_k_groups, ne12*ne13, ne02, ne12, r2, r3, padded_n,
 -        b_col_bytes, (uint64_t)dst->nb[1]
 +        b_col_bytes, (uint64_t)dst->nb[1], fused_bias != nullptr ? &bias_buf : nullptr
      );  // NOLINT
  
      if (x_non_contig || qx_needs_dequant) {
-@@ -7872,6 +7940,11 @@ void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const st
+@@ -8245,6 +8318,11 @@ void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const st
      } else if ((dst->ne[1] == 1 || (dst->ne[1] <= ggml_vk_mul_mat_vec_max_cols(ctx->device) && src1->ne[2] * src1->ne[3] == 1)) &&
                 (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16 || ggml_is_quantized(src0->type))) {
          ggml_vk_mul_mat_vec_q_f16(ctx, subctx, cgraph, node_idx);
@@ -211,7 +215,7 @@ index b5b4264fb..593d82559 100644
      } else {
          ggml_vk_mul_mat_q_f16(ctx, subctx, src0, src1, dst, false);
      }
-@@ -8822,10 +8895,13 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
+@@ -9195,10 +9273,13 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
      bool xe_fa_opt = false;
      bool xe_fa_use_2phases = false;
      bool xe_fa_supported_platform = vk_dev->xe_fa_support && vk_dev->properties.deviceID != 0xFD80 && vk_dev->properties.deviceID != 0xFD81;
@@ -227,7 +231,7 @@ index b5b4264fb..593d82559 100644
      xe_fa_opt = xe_fa_supported_platform && xe_fa_supported_usage && xe_fa_supported_dtype;
      std::pair<vk_pipeline, vk_pipeline> xe_fa_pipeline_dual_phases = { nullptr , nullptr };
      vk_pipeline xe_fa_pipeline = nullptr;
-@@ -8835,6 +8911,10 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
+@@ -9208,6 +9289,10 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
      size_t size_decode_temp = 0;
      uint32_t pv_ratio = uint32_t(neq2 / nev2);
      vk_xe_fa_tuning_params xe_fa_params {};
@@ -238,7 +242,7 @@ index b5b4264fb..593d82559 100644
  
      {
          std::lock_guard<std::mutex> guard(ctx->device->compile_mutex);
-@@ -9166,7 +9246,7 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
+@@ -9539,7 +9624,7 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
  
          vk_xe_fa_push_constants pc_xe_fa = { (uint32_t)neq1, (uint32_t)neq2, (uint32_t)neq3,
                                               (uint32_t)nek1, (uint32_t)nek2, (uint32_t)nek3, (uint32_t)nev2, (uint32_t)nev3,
@@ -247,7 +251,7 @@ index b5b4264fb..593d82559 100644
                                               q_stride, head_stride_q, k_stride, head_stride_k, v_stride, head_stride_v,
                                               batch_stride_q, batch_stride_k, batch_stride_v, batch_stride_o,
                                               (sinks != nullptr) ? (1u << 16) : 0u, scale };
-@@ -14405,9 +14485,23 @@ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgr
+@@ -14808,9 +14893,23 @@ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgr
      auto const &mm_add_ok = [&](const ggml_tensor *mul, const ggml_tensor *add) {
          const ggml_tensor *bias = add->src[0] == mul ? add->src[1] : add->src[0];
  
@@ -273,7 +277,7 @@ index b5b4264fb..593d82559 100644
          }
          // shaders assume the types match
          if (mul->type != bias->type) {
-@@ -17181,9 +17275,10 @@ bool ggml_vk_device_is_supported(const vk::PhysicalDevice & vkdev) {
+@@ -17582,9 +17681,10 @@ bool ggml_vk_device_is_supported(const vk::PhysicalDevice & vkdev) {
  bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDeviceProperties& props, const vk::PhysicalDeviceDriverProperties& driver_props, vk_device_architecture arch) {
      switch (props.vendorID) {
      case VK_VENDOR_ID_INTEL:
@@ -287,82 +291,76 @@ index b5b4264fb..593d82559 100644
          if (driver_props.driverID == vk::DriverId::eAmdProprietary || driver_props.driverID == vk::DriverId::eAmdOpenSource) {
              // Workaround for AMD proprietary driver reporting support on all GPUs
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
-index 19d37870b..7fd8b8ae3 100644
+index 68de76373..b00f572b3 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
 +++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
-@@ -125,6 +125,9 @@ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
- #ifdef MUL_MAT_ID
- layout (binding = 3) readonly buffer IDS {int data_ids[];};
- layout (binding = 4) readonly buffer RowMap {uint data_row_map[];};
-+#else
+@@ -124,6 +124,8 @@ layout (binding = 1) readonly buffer B_SCALAR {B_TYPE_SCALAR data_b_scalar[];};
+ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
+ #ifndef MUL_MAT_ID
+ layout (binding = 3) writeonly buffer S {D_TYPE data_s[];};
 +// fused MUL_MAT + ADD of a bias broadcast over the columns (bias[row]), used when p.fuse_bias != 0
-+layout (binding = 3) readonly buffer BIAS {D_TYPE data_bias[];};
++layout (binding = 4) readonly buffer BIAS {D_TYPE data_bias[];};
  #endif
  
- layout (push_constant) uniform parameter
-@@ -155,6 +158,8 @@ layout (push_constant) uniform parameter
-     uint ne12;
-     uint broadcast2;
-     uint broadcast3;
-+    uint padded_N;
+ #ifdef MUL_MAT_ID
+@@ -171,6 +173,7 @@ layout (push_constant) uniform parameter
+     uint broadcast3_mp;
+     uint div_Ls0;
+     uint div_Ls1;
 +    uint fuse_bias;
  #endif
  } p;
  
-@@ -463,12 +468,14 @@ void main() {
-     }
- #else
-     const bool is_aligned = p.stride_d % 4 == 0;  // Assumption: D_TYPE == float
-+    // add the bias once: only the first k-split slice (the split-k reduce sums the slices)
-+    const bool add_bias = p.fuse_bias != 0 && ik == 0;
+@@ -543,8 +546,10 @@ void main() {
+             } else {
+                 const bool is_aligned = p.stride_d % 4 == 0;  // Assumption: D_TYPE == float
+                 const bool is_in_bounds = dr + (cm_row + 1) * TM <= p.M && dc + (cm_col + 1) * TN <= p.N;
++                // add the bias once: only the first k-split slice (the split-k reduce sums the slices)
++                const bool add_bias = p.fuse_bias != 0 && ik == 0;
  
-     [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
-         [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
-             const bool is_in_bounds = dr + (cm_row + 1) * TM <= p.M && dc + (cm_col + 1) * TN <= p.N;
+-                if (is_aligned && is_in_bounds) {
++                if (is_aligned && is_in_bounds && !add_bias) {
+                     // Full coopMat is within bounds and stride_d is aligned with 16B
+                     coopMatStore(cm_dtype, data_d, offsets + (dc + cm_col * TN) * p.stride_d + dr + cm_row * TM, p.stride_d, gl_CooperativeMatrixLayoutColumnMajor);
+                 } else if (is_in_bounds) {
+@@ -553,7 +558,7 @@ void main() {
  
--            if (is_aligned && is_in_bounds) {
-+            if (is_aligned && is_in_bounds && !add_bias) {
-                 // Full coopMat is within bounds and stride_d is aligned with 16B
-                 coopmat<D_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> cm_dtype = coopmat<D_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(sums[cm_col * cms_per_row + cm_row]);
-                 coopMatStore(cm_dtype, data_d, offsets + (dc + cm_col * TN) * p.stride_d + dr + cm_row * TM, p.stride_d, gl_CooperativeMatrixLayoutColumnMajor);
-@@ -478,7 +485,7 @@ void main() {
- 
-                 controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
-                 [[unroll]] for (uint col = 0; col < TN; col += storestride) {
--                    data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
-+                    data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]) + (add_bias ? data_bias[dr + cm_row * TM + store_r] : D_TYPE(0));
-                 }
-                 controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
-             } else if (dr + cm_row * TM < p.M && dc + cm_col * TN < p.N) {
-@@ -488,7 +495,7 @@ void main() {
-                 controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
-                 [[unroll]] for (uint col = 0; col < TN; col += storestride) {
-                     if (dr + cm_row * TM + store_r < p.M && dc + cm_col * TN + col + store_c < p.N) {
+                     controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+                     [[unroll]] for (uint col = 0; col < TN; col += storestride) {
 -                        data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
 +                        data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]) + (add_bias ? data_bias[dr + cm_row * TM + store_r] : D_TYPE(0));
                      }
-                 }
-                 controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
-@@ -519,11 +526,12 @@ void main() {
-                         data_d[row_idx.y * p.batch_stride_d + row_idx.x * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
+                     controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+                 } else if (dr + cm_row * TM < p.M && dc + cm_col * TN < p.N) {
+@@ -563,7 +568,7 @@ void main() {
+                     controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+                     [[unroll]] for (uint col = 0; col < TN; col += storestride) {
+                         if (dr + cm_row * TM + store_r < p.M && dc + cm_col * TN + col + store_c < p.N) {
+-                            data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
++                            data_d[offsets + (dc + cm_col * TN + col + store_c) * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]) + (add_bias ? data_bias[dr + cm_row * TM + store_r] : D_TYPE(0));
+                         }
                      }
- #else
-+                    const bool add_bias = p.fuse_bias != 0 && ik == 0;
-                     if (dr_warp + 2 * cr < p.M && dc_warp + cc < p.N) {
--                        data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr] = D_TYPE(sums[sums_idx].x);
-+                        data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr] = D_TYPE(sums[sums_idx].x) + (add_bias ? data_bias[dr_warp + 2 * cr] : D_TYPE(0));
-                     }
-                     if (dr_warp + 2 * cr + 1 < p.M && dc_warp + cc < p.N) {
--                        data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
-+                        data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y) + (add_bias ? data_bias[dr_warp + 2 * cr + 1] : D_TYPE(0));
+                     controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+@@ -605,11 +610,12 @@ void main() {
+                             data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
+                         }
+                     } else {
++                        const bool add_bias = p.fuse_bias != 0 && ik == 0;
+                         if (dr_warp + 2 * cr < p.M && dc_warp + cc < p.N) {
+-                            data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr] = D_TYPE(sums[sums_idx].x);
++                            data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr] = D_TYPE(sums[sums_idx].x) + (add_bias ? data_bias[dr_warp + 2 * cr] : D_TYPE(0));
+                         }
+                         if (dr_warp + 2 * cr + 1 < p.M && dc_warp + cc < p.N) {
+-                            data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y);
++                            data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + 2 * cr + 1] = D_TYPE(sums[sums_idx].y) + (add_bias ? data_bias[dr_warp + 2 * cr + 1] : D_TYPE(0));
+                         }
                      }
  #endif // MUL_MAT_ID
-                 }
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 74aac916e..64a4a9d23 100644
+index 11bfa42a9..0817384f9 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -11983,6 +11983,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12149,6 +12149,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
              }
              test_cases.emplace_back(new test_mul_mat_add(type_a, 2048, n, 2048, MUL_MAT_ADD_B_INPLACE));
          }
