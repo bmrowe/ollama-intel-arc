@@ -11,6 +11,13 @@ llama.cpp's Vulkan server with two changes for Intel Arc Alchemist (A-series, DG
      keep that path. Upstream only creates them when matrix cores are off, and the
      dequant-to-f16 matrix-core path is slower for quantized types on this card.
    - Those int8 pipelines stay off the large tile, as they are without matrix cores.
+   - Intel's Xe flash-attention shader (`flash_attn_prefill.comp`, already written for
+     Xe1's 8x8x16 matrix shape) is allowed on Alchemist discrete GPUs too. Upstream only
+     enables it on integrated Xe1. It is used for prefill only (its decode shader is
+     slower here than the scalar one), and also for mask-less prefill such as vision
+     encoders, which otherwise fall back to the scalar shader because upstream's
+     coopmat1 flash attention needs a 16x16x16 shape. `GGML_VK_DISABLE_XE_FA_DGPU=1`
+     turns it off at runtime.
 2. **Mesa from the [kisak PPA](https://launchpad.net/~kisak/+archive/ubuntu/kisak-mesa)**
    instead of Ubuntu 26.04's.
 
@@ -35,6 +42,12 @@ patch stops applying, the build fails and `:latest` stays on the last good image
 Server request with three 500x500 images (image encoding + prompt, median):
 5.29 s with matrix cores off, 3.80 s with this patch. The gain comes from the F16
 vision encoder; quantized matmul only ties the integer dot-product path.
+With the Xe flash-attention change on top: 3.34 s (3.88-4.05 s without it, same
+session), generation unchanged; descriptions of four real camera snapshots match the
+version without it. `test-backend-ops -o FLASH_ATTN_EXT` passes every case at head
+sizes 64 and 128 and every mask-less case; the only failures are small precision
+misses (0.0006-0.0028 vs 0.0005) in the Xe decode shader at head sizes 192-512,
+which this patch does not use on discrete Alchemist.
 
 `test-backend-ops` on the A380 (llama.cpp d3c3e242c, kisak Mesa 26.2.7): MUL_MAT and
 MUL_MAT_ID pass 3762/3762. MUL_MAT perf against matrix cores off, 241 shapes: n=1-8
