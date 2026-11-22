@@ -63,7 +63,25 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        id: buildx
         uses: docker/setup-buildx-action@v4
+
+      # Reuse the build workflow's ccache (read-only: nothing is saved back)
+      - name: Restore ccache
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        uses: actions/cache/restore@v4
+        with:
+          path: ccache-tbo
+          key: ccache-vulkan-${{ steps.check.outputs.rev }}
+          restore-keys: ccache-vulkan-
+
+      - name: Load ccache into BuildKit
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723  # v3.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          cache-map: '{"ccache-tbo": {"target": "/root/.cache/ccache", "id": "ccache-tbo"}}'
+          skip-extraction: true
 
       - name: Build test-backend-ops
         if: steps.seen.outputs.cache-hit != 'true' || inputs.force
@@ -75,6 +93,7 @@ jobs:
           push: false
           provenance: false
           tags: test-backend-ops:ci
+          cache-from: type=gha,scope=tbo
 
       - name: Run suites on lavapipe
         if: steps.seen.outputs.cache-hit != 'true' || inputs.force

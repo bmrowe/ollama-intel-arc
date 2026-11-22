@@ -3,13 +3,15 @@
 FROM docker.io/ubuntu:26.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
+ && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates ccache \
       libvulkan-dev glslc spirv-headers libssl-dev
 WORKDIR /src
 COPY . .
-RUN cmake -B build -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF \
+RUN --mount=type=cache,id=ccache-tbo,target=/root/.cache/ccache \
+    cmake -B build -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF \
       -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DGGML_BACKEND_DL=OFF \
  && cmake --build build --config Release --target test-backend-ops -j"$(nproc)" \
+ && ccache --show-stats \
  && mkdir -p /out && cp build/bin/test-backend-ops /out/ \
  && find build -name "*.so*" -exec cp -P {} /out/ \;
 

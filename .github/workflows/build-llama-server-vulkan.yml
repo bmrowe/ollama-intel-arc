@@ -14,6 +14,8 @@ on:
     paths:
       - llama-server-vulkan/Dockerfile
       - llama-server-vulkan/intel-alchemist-coopmat.patch
+      - llama-server-vulkan/slim-dockerfile.py
+      - llama-server-vulkan/test/Dockerfile.backend-ops
       - .github/workflows/build-llama-server-vulkan.yml
 
 permissions:
@@ -32,6 +34,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Check upstream build, kisak Mesa and patch
@@ -47,6 +50,13 @@ jobs:
             | jq -r '[.config.Labels["io.github.bmrowe.llama-revision"], .config.Labels["io.github.bmrowe.mesa-version"], .config.Labels["io.github.bmrowe.patch-sha"]] | join(" ")' || true)
           echo "want: $want"; echo "have: ${have:-none}"
           { echo "rev=$rev"; echo "mesa=$mesa"; echo "patch_sha=$patch_sha"; } >> "$GITHUB_OUTPUT"
+          # main publishes :base/:latest; any other branch publishes test tags only
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            { echo "base_tag=base"; echo "tag=latest"; } >> "$GITHUB_OUTPUT"
+          else
+            t="test-${GITHUB_REF_NAME//[^a-zA-Z0-9_.-]/-}"
+            { echo "base_tag=$t-base"; echo "tag=$t"; } >> "$GITHUB_OUTPUT"
+          fi
           if [ "$want" = "$have" ] && [ "${{ inputs.force }}" != "true" ] && [ "${{ github.event_name }}" != "push" ]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
@@ -60,9 +70,36 @@ jobs:
           ref: ${{ steps.check.outputs.rev }}
           path: llama.cpp
 
-      - name: Apply Alchemist matrix-core patch
+      - name: Apply Alchemist matrix-core patch, trim the build
         if: steps.check.outputs.build == 'true'
-        run: git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
+        run: |
+          git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
+          python3 llama-server-vulkan/slim-dockerfile.py llama.cpp/.devops/vulkan.Dockerfile
+
+      # ccache for both compiles lives in BuildKit cache mounts (ids ccache-server,
+      # ccache-tbo); buildkit-cache-dance moves them in and out of the Actions cache.
+      - name: Restore ccache
+        if: steps.check.outputs.build == 'true'
+        id: ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ccache-server
+            ccache-tbo
+          key: ccache-vulkan-${{ steps.check.outputs.rev }}-${{ steps.check.outputs.patch_sha }}
+          restore-keys: ccache-vulkan-
+
+      - name: Load ccache into BuildKit
+        if: steps.check.outputs.build == 'true'
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723  # v3.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          cache-map: |
+            {
+              "ccache-server": {"target": "/root/.cache/ccache", "id": "ccache-server"},
+              "ccache-tbo": {"target": "/root/.cache/ccache", "id": "ccache-tbo"}
+            }
+          skip-extraction: ${{ steps.ccache.outputs.cache-hit }}
 
       # Gate: the fused MUL_MAT + bias ADD (the one patched path lavapipe can
       # reach) must pass test-backend-ops on lavapipe, Mesa's CPU Vulkan driver,
@@ -80,6 +117,8 @@ jobs:
           push: false
           provenance: false
           tags: test-backend-ops:ci
+          cache-from: type=gha,scope=tbo
+          cache-to: type=gha,scope=tbo,mode=min
 
       - name: Test the fused bias on lavapipe
         if: steps.check.outputs.build == 'true'
@@ -94,7 +133,7 @@ jobs:
             | grep -E "Device description|FAIL|tests passed|Backend"
 
       - name: Log into GHCR
-        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
+        if: steps.check.outputs.build == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -102,7 +141,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build patched llama.cpp server
-        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
+        if: steps.check.outputs.build == 'true'
         uses: docker/build-push-action@v7
         with:
           context: llama.cpp
@@ -112,19 +151,21 @@ jobs:
           provenance: false
           build-args: |
             APP_REVISION=${{ steps.check.outputs.rev }}
-          tags: ${{ env.IMAGE }}:base
+          tags: ${{ env.IMAGE }}:${{ steps.check.outputs.base_tag }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=min
 
       - name: Add kisak Mesa and publish
-        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
+        if: steps.check.outputs.build == 'true'
         uses: docker/build-push-action@v7
         with:
           context: llama-server-vulkan
           push: true
           provenance: false
           build-args: |
-            BASE_IMAGE=${{ env.IMAGE }}:base
+            BASE_IMAGE=${{ env.IMAGE }}:${{ steps.check.outputs.base_tag }}
           labels: |
             io.github.bmrowe.llama-revision=${{ steps.check.outputs.rev }}
             io.github.bmrowe.mesa-version=${{ steps.check.outputs.mesa }}
             io.github.bmrowe.patch-sha=${{ steps.check.outputs.patch_sha }}
-          tags: ${{ env.IMAGE }}:latest
+          tags: ${{ env.IMAGE }}:${{ steps.check.outputs.tag }}
