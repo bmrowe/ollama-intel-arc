@@ -64,8 +64,37 @@ jobs:
         if: steps.check.outputs.build == 'true'
         run: git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
 
-      - name: Log into GHCR
+      # Gate: the fused MUL_MAT + bias ADD (the one patched path lavapipe can
+      # reach) must pass test-backend-ops on lavapipe, Mesa's CPU Vulkan driver,
+      # before anything is published (~1 min). Same settings as upstream's
+      # llvmpipe CI. The long suites run nightly in test-llama-server-vulkan.yml;
+      # the Xe1-dGPU-only paths (tiles, Q6_K subgroup size, Xe FA) still need
+      # a run on the A380.
+      - name: Build test-backend-ops
         if: steps.check.outputs.build == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: llama.cpp
+          file: llama-server-vulkan/test/Dockerfile.backend-ops
+          load: true
+          push: false
+          provenance: false
+          tags: test-backend-ops:ci
+
+      - name: Test the fused bias on lavapipe
+        if: steps.check.outputs.build == 'true'
+        timeout-minutes: 10
+        shell: bash  # -eo pipefail: a test failure fails the step despite the grep
+        run: |
+          docker run --rm \
+            -e GGML_VK_VISIBLE_DEVICES=0 \
+            -e GGML_VK_DISABLE_F16=1 \
+            -e GGML_VK_DISABLE_COOPMAT=1 \
+            test-backend-ops:ci -b Vulkan0 -o MUL_MAT_ADD 2>&1 \
+            | grep -E "Device description|FAIL|tests passed|Backend"
+
+      - name: Log into GHCR
+        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -73,7 +102,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build patched llama.cpp server
-        if: steps.check.outputs.build == 'true'
+        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: llama.cpp
@@ -86,7 +115,7 @@ jobs:
           tags: ${{ env.IMAGE }}:base
 
       - name: Add kisak Mesa and publish
-        if: steps.check.outputs.build == 'true'
+        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: llama-server-vulkan

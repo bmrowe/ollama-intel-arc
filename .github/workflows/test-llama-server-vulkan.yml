@@ -1,0 +1,119 @@
+name: Test llama-server-vulkan-unraid on lavapipe (nightly)
+
+# The long test-backend-ops suites against what :latest was built from, on
+# lavapipe (Mesa's CPU Vulkan driver). Does not gate the build: the build only
+# runs MUL_MAT_ADD. Skips when the llama.cpp revision and patch have already
+# passed here. lavapipe cannot reach the Xe1-dGPU-only paths (tiles, Q6_K
+# subgroup size, Xe FA); those still need a run on the A380.
+
+on:
+  schedule:
+    - cron: "0 10 * * *"  # 2.5 h after the 07:30 build check
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if this revision and patch already passed"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/bmrowe/llama-server-vulkan-unraid
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find what :latest was built from
+        id: check
+        run: |
+          labels=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' | jq -c '.config.Labels')
+          rev=$(echo "$labels" | jq -r '.["io.github.bmrowe.llama-revision"]')
+          built_sha=$(echo "$labels" | jq -r '.["io.github.bmrowe.patch-sha"]')
+          repo_sha=$(sha256sum llama-server-vulkan/intel-alchemist-coopmat.patch | cut -c1-12)
+          echo ":latest = llama.cpp $rev, patch $built_sha; repo patch $repo_sha"
+          if [ "$built_sha" != "$repo_sha" ]; then
+            echo "::warning:::latest was built from patch $built_sha but main has $repo_sha (build pending or failed); testing main's patch at $rev"
+          fi
+          { echo "rev=$rev"; echo "key=lavapipe-passed-$rev-$repo_sha"; } >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already passed
+        id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: lavapipe-passed
+          key: ${{ steps.check.outputs.key }}
+          lookup-only: true
+
+      - uses: actions/checkout@v4
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ steps.check.outputs.rev }}
+          path: llama.cpp
+
+      - name: Apply Alchemist matrix-core patch
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        run: git -C llama.cpp apply --verbose ../llama-server-vulkan/intel-alchemist-coopmat.patch
+
+      - name: Set up Docker Buildx
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build test-backend-ops
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        uses: docker/build-push-action@v7
+        with:
+          context: llama.cpp
+          file: llama-server-vulkan/test/Dockerfile.backend-ops
+          load: true
+          push: false
+          provenance: false
+          tags: test-backend-ops:ci
+
+      - name: Run suites on lavapipe
+        if: steps.seen.outputs.cache-hit != 'true' || inputs.force
+        run: |
+          status=0
+          for op in MUL_MAT_ADD MUL_MAT MUL_MAT_ID FLASH_ATTN_EXT; do
+            start=$(date +%s)
+            timeout 5400 docker run --rm --init --name "tbo-$op" \
+              -e GGML_VK_VISIBLE_DEVICES=0 \
+              -e GGML_VK_DISABLE_F16=1 \
+              -e GGML_VK_DISABLE_COOPMAT=1 \
+              test-backend-ops:ci -b Vulkan0 -o "$op" > "$op.log" 2>&1 && rc=0 || rc=$?
+            docker rm -f "tbo-$op" >/dev/null 2>&1 || true
+            secs=$(( $(date +%s) - start ))
+            summary=$(grep -E "tests passed" "$op.log" | tail -1 | sed 's/^ *//')
+            [ "$rc" = 124 ] && summary="timed out"
+            echo "== $op: exit $rc after ${secs} s: ${summary:-no summary}"
+            grep -E "FAIL" "$op.log" | head -20 || true
+            echo "| $op | ${summary:-no summary} | ${secs} s | $rc |" >> summary.md
+            [ "$rc" = 0 ] || status=1
+          done
+          { echo "llama.cpp ${{ steps.check.outputs.rev }} on lavapipe"; echo; echo "| op | result | time | exit |"; echo "|---|---|---|---|"; cat summary.md; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Keep the logs
+        if: always() && (steps.seen.outputs.cache-hit != 'true' || inputs.force)
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-backend-ops-lavapipe
+          path: "*.log"
+          retention-days: 14
+
+      - name: Remember this revision and patch passed
+        if: success() && steps.seen.outputs.cache-hit != 'true'
+        run: mkdir -p lavapipe-passed && echo "${{ steps.check.outputs.key }}" > lavapipe-passed/key
+
+      - name: Save pass marker
+        if: success() && steps.seen.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: lavapipe-passed
+          key: ${{ steps.check.outputs.key }}
