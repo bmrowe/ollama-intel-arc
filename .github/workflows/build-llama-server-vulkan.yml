@@ -50,13 +50,6 @@ jobs:
             | jq -r '[.config.Labels["io.github.bmrowe.llama-revision"], .config.Labels["io.github.bmrowe.mesa-version"], .config.Labels["io.github.bmrowe.patch-sha"]] | join(" ")' || true)
           echo "want: $want"; echo "have: ${have:-none}"
           { echo "rev=$rev"; echo "mesa=$mesa"; echo "patch_sha=$patch_sha"; } >> "$GITHUB_OUTPUT"
-          # main publishes :base/:latest; any other branch publishes test tags only
-          if [ "$GITHUB_REF" = refs/heads/main ]; then
-            { echo "base_tag=base"; echo "tag=latest"; } >> "$GITHUB_OUTPUT"
-          else
-            t="test-${GITHUB_REF_NAME//[^a-zA-Z0-9_.-]/-}"
-            { echo "base_tag=$t-base"; echo "tag=$t"; } >> "$GITHUB_OUTPUT"
-          fi
           if [ "$want" = "$have" ] && [ "${{ inputs.force }}" != "true" ] && [ "${{ github.event_name }}" != "push" ]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
@@ -132,8 +125,10 @@ jobs:
             test-backend-ops:ci -b Vulkan0 -o MUL_MAT_ADD 2>&1 \
             | grep -E "Device description|FAIL|tests passed|Backend"
 
+      # Only main publishes. A branch run still compiles the server image (and
+      # runs the gate above) but pushes nothing.
       - name: Log into GHCR
-        if: steps.check.outputs.build == 'true'
+        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -147,25 +142,25 @@ jobs:
           context: llama.cpp
           file: llama.cpp/.devops/vulkan.Dockerfile
           target: server
-          push: true
+          push: ${{ github.ref == 'refs/heads/main' }}
           provenance: false
           build-args: |
             APP_REVISION=${{ steps.check.outputs.rev }}
-          tags: ${{ env.IMAGE }}:${{ steps.check.outputs.base_tag }}
+          tags: ${{ env.IMAGE }}:base
           cache-from: type=gha,scope=server
           cache-to: type=gha,scope=server,mode=min
 
       - name: Add kisak Mesa and publish
-        if: steps.check.outputs.build == 'true'
+        if: steps.check.outputs.build == 'true' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: llama-server-vulkan
           push: true
           provenance: false
           build-args: |
-            BASE_IMAGE=${{ env.IMAGE }}:${{ steps.check.outputs.base_tag }}
+            BASE_IMAGE=${{ env.IMAGE }}:base
           labels: |
             io.github.bmrowe.llama-revision=${{ steps.check.outputs.rev }}
             io.github.bmrowe.mesa-version=${{ steps.check.outputs.mesa }}
             io.github.bmrowe.patch-sha=${{ steps.check.outputs.patch_sha }}
-          tags: ${{ env.IMAGE }}:${{ steps.check.outputs.tag }}
+          tags: ${{ env.IMAGE }}:latest
