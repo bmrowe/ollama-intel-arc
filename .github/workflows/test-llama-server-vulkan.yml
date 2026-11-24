@@ -101,7 +101,8 @@ jobs:
           status=0
           for op in MUL_MAT_ADD MUL_MAT MUL_MAT_ID FLASH_ATTN_EXT; do
             start=$(date +%s)
-            timeout 5400 docker run --rm --init --name "tbo-$op" \
+            # Runner speed varies ~3x: FA took 45 min on one, >90 on another
+            timeout 10800 docker run --rm --init --name "tbo-$op" \
               -e GGML_VK_VISIBLE_DEVICES=0 \
               -e GGML_VK_DISABLE_F16=1 \
               -e GGML_VK_DISABLE_COOPMAT=1 \
